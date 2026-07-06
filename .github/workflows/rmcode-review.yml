@@ -34,6 +34,10 @@ on:
       source_repository:
         required: false
         type: string
+      source_base_sha:
+        required: false
+        type: string
+        default: ""
       review_tier:
         required: false
         type: string
@@ -116,13 +120,23 @@ jobs:
             fi
             source_pr="$(python3 -c 'import os, re; repo = os.environ.get("GITHUB_REPOSITORY", ""); match = re.search(r"__PR(\d+)__", repo); print(match.group(1) if match else "")')"
             if [ -n "$source_pr" ]; then
-              echo "Resolving source benchmark checkout for ${{ inputs.source_repository }}#$source_pr"
-              if source_base_sha="$(curl --fail --location --show-error --silent \
-                  "https://api.github.com/repos/${{ inputs.source_repository }}/pulls/$source_pr" \
-                  -H "Authorization: token $GITHUB_TOKEN" \
-                  -H "Accept: application/vnd.github+json" \
-                  | python3 -c 'import json, sys; print(json.load(sys.stdin)["base"]["sha"])')" \
-                && git fetch --no-tags --depth=1 origin "$source_base_sha" \
+              source_base_sha="${{ inputs.source_base_sha }}"
+              if [ -z "$source_base_sha" ]; then
+                source_base_sha="$(git log -1 --format=%B "$base_sha" | sed -n 's/^RMCode-Source-Base-SHA: //p' | head -n 1)"
+              fi
+              if [ -n "$source_base_sha" ]; then
+                echo "Using pinned source benchmark checkout for ${{ inputs.source_repository }}#$source_pr at $source_base_sha"
+              else
+                echo "Resolving source benchmark checkout for ${{ inputs.source_repository }}#$source_pr"
+                source_base_sha="$(curl --fail --location --show-error --silent \
+                    "https://api.github.com/repos/${{ inputs.source_repository }}/pulls/$source_pr" \
+                    -H "Authorization: token $GITHUB_TOKEN" \
+                    -H "Accept: application/vnd.github+json" \
+                    | python3 -c 'import json, sys; print(json.load(sys.stdin)["base"]["sha"])')" || source_base_sha=""
+              fi
+              source_remote_url="https://github.com/${{ inputs.source_repository }}.git"
+              if [ -n "$source_base_sha" ] \
+                && git fetch --no-tags --depth=1 "$source_remote_url" "$source_base_sha" \
                 && git checkout --force "$source_base_sha"; then
                 context_base_sha="$source_base_sha"
                 echo "Checked out source benchmark base for context extraction."
@@ -139,6 +153,7 @@ jobs:
           REPOMAP_MAX_CHARS: "80000"
           RMCODE_EXTRACTOR_VERSION: "${{ inputs.version }}"
           RMCODE_EXTRACTOR_SHA256: "${{ inputs.extractor_sha256 }}"
+          PR_TITLE: "${{ inputs.pr_title }}"
         run: |
           if [ -z "${RMCODE_WORKFLOW_SHA256:-}" ] && [ -f .github/workflows/rmcode-review.yml ]; then
             export RMCODE_WORKFLOW_SHA256="$(sha256sum .github/workflows/rmcode-review.yml | awk '{print $1}')"
@@ -147,7 +162,7 @@ jobs:
             --pr="${{ inputs.pr_number }}" \
             --diff-file="$RUNNER_TEMP/rmcode-pr.diff" \
             --base-sha="$RMCODE_CONTEXT_BASE_SHA" \
-            --pr-title="${{ inputs.pr_title }}" \
+            --pr-title="$PR_TITLE" \
             --callback="${{ inputs.callback_url }}" \
             --token="${{ inputs.auth_token }}" \
             --source-repo="${{ inputs.source_repository || github.repository }}" \
